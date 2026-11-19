@@ -1,0 +1,114 @@
+# SPDX-FileCopyrightText: 2026 Contributors to the Media eXchange Layer project.
+# SPDX-License-Identifier: Apache-2.0
+
+# Experiment, not for upstream: how reliable are the gst-mxl-rs tests on a
+# GitHub macOS runner, with test domains on disk and on a RAM disk?
+name: macOS timing experiment
+
+on:
+  push:
+    branches:
+      - ci-experiment/**
+
+permissions:
+  contents: read
+
+jobs:
+  plugin_tests:
+    name: gst-mxl-rs tests x${{ matrix.rounds }} (${{ matrix.domain }})
+    strategy:
+      fail-fast: false
+      matrix:
+        domain: [disk, ramdisk]
+        rounds: [6]
+    runs-on: macos-26
+    env:
+      RUST_VERSION: 1.90.0
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          path: 'mxl'
+          submodules: true
+
+      - name: Describe the runner
+        run: |
+          sysctl -n machdep.cpu.brand_string hw.ncpu hw.memsize
+          sw_vers
+          cmake --version | head -n1
+
+      - name: Restore vcpkg cache
+        id: vcpkg-cache-restore
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ github.workspace }}/vcpkg_cache
+          key: vcpkg-experiment-macos-26-arm64-${{ hashFiles('mxl/vcpkg.json') }}
+
+      - name: Install build dependencies
+        run: brew install cmake gstreamer ninja pkgconf
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install "${RUST_VERSION}" --profile minimal
+          rustup default "${RUST_VERSION}"
+
+      - name: Install vcpkg
+        run: |
+          git clone https://github.com/microsoft/vcpkg '${{ github.workspace }}/vcpkg'
+          '${{ github.workspace }}/vcpkg/bootstrap-vcpkg.sh' -disableMetrics
+          printf 'VCPKG_ROOT=%s\n' '${{ github.workspace }}/vcpkg' >> "${GITHUB_ENV}"
+          printf 'VCPKG_BINARY_SOURCES=clear;files,${{ github.workspace }}/vcpkg_cache,readwrite\n' >> "${GITHUB_ENV}"
+          printf 'VCPKG_DEFAULT_TRIPLET=arm64-osx\n' >> "${GITHUB_ENV}"
+
+      - name: Build the tests
+        working-directory: mxl/rust
+        run: |
+          # The spdlog patch download from github.com fails with 503 now and then.
+          for attempt in 1 2 3 4 5; do
+            if cargo test --release -p gst-mxl-rs --all-targets --locked --no-run; then
+              exit 0
+            fi
+            echo "build attempt ${attempt} failed; waiting before the next one"
+            sleep 60
+          done
+          exit 1
+
+      - name: Save vcpkg cache
+        if: steps.vcpkg-cache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ github.workspace }}/vcpkg_cache
+          key: ${{ steps.vcpkg-cache-restore.outputs.cache-primary-key }}
+
+      - name: Put the test domains on a RAM disk
+        if: matrix.domain == 'ramdisk'
+        run: |
+          device="$(hdiutil attach -nomount ram://4194304 | awk '{print $1}')"
+          diskutil erasevolume APFS mxlram "${device}"
+          printf 'TMPDIR=/Volumes/mxlram/\n' >> "${GITHUB_ENV}"
+
+      - name: Run the tests repeatedly
+        working-directory: mxl/rust
+        run: |
+          echo "TMPDIR=${TMPDIR}"
+          mkdir -p '${{ github.workspace }}/logs'
+          for round in $(seq 1 ${{ matrix.rounds }}); do
+            log='${{ github.workspace }}'"/logs/round-${round}.log"
+            cargo test --release -p gst-mxl-rs --all-targets --locked --no-fail-fast -- --test-threads=1 > "${log}" 2>&1 || true
+            passed="$(grep -E '^test result' "${log}" | awk '{p+=$4} END{print p+0}')"
+            failed="$(grep -E '^test result' "${log}" | awk '{f+=$6} END{print f+0}')"
+            skipped="$(grep -cE '^test .* \.\.\. skipped,' "${log}" || true)"
+            echo "round ${round}: passed ${passed}, failed ${failed}, skipped ${skipped}"
+            grep -E '^test .* \.\.\. FAILED' "${log}" | sed 's/^/    /' || true
+          done
+          echo "=== failures over all rounds"
+          cat '${{ github.workspace }}'/logs/round-*.log | grep -E '^test .* \.\.\. FAILED' | sort | uniq -c | sort -rn || true
+          echo "=== panic messages"
+          cat '${{ github.workspace }}'/logs/round-*.log | grep -A2 'panicked at' | grep -v '^--$' | sort | uniq -c | sort -rn | head -60 || true
+
+      - name: Upload the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ matrix.domain }}
+          path: ${{ github.workspace }}/logs
