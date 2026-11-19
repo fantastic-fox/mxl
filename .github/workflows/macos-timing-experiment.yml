@@ -14,13 +14,13 @@ permissions:
   contents: read
 
 jobs:
-  plugin_tests:
-    name: gst-mxl-rs tests x${{ matrix.rounds }} (${{ matrix.domain }})
+  proposed_ci_step:
+    name: Proposed macOS test step x${{ matrix.rounds }} (attempt ${{ matrix.attempt }})
     strategy:
       fail-fast: false
       matrix:
-        domain: [disk, ramdisk]
-        rounds: [6]
+        attempt: [1, 2]
+        rounds: [5]
     runs-on: macos-26
     env:
       RUST_VERSION: 1.90.0
@@ -34,7 +34,6 @@ jobs:
       - name: Describe the runner
         run: |
           sysctl -n machdep.cpu.brand_string hw.ncpu hw.memsize
-          sw_vers
           cmake --version | head -n1
 
       - name: Restore vcpkg cache
@@ -65,7 +64,7 @@ jobs:
         run: |
           # The spdlog patch download from github.com fails with 503 now and then.
           for attempt in 1 2 3 4 5; do
-            if cargo test --release -p gst-mxl-rs --all-targets --locked --no-run; then
+            if cargo test --release --all-targets --locked --no-run; then
               exit 0
             fi
             echo "build attempt ${attempt} failed; waiting before the next one"
@@ -73,42 +72,20 @@ jobs:
           done
           exit 1
 
-      - name: Save vcpkg cache
-        if: steps.vcpkg-cache-restore.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
-        with:
-          path: ${{ github.workspace }}/vcpkg_cache
-          key: ${{ steps.vcpkg-cache-restore.outputs.cache-primary-key }}
-
-      - name: Put the test domains on a RAM disk
-        if: matrix.domain == 'ramdisk'
-        run: |
-          device="$(hdiutil attach -nomount ram://4194304 | awk '{print $1}')"
-          diskutil erasevolume APFS mxlram "${device}"
-          printf 'TMPDIR=/Volumes/mxlram/\n' >> "${GITHUB_ENV}"
-
-      - name: Run the tests repeatedly
+      - name: Run the proposed test step repeatedly
         working-directory: mxl/rust
         run: |
-          echo "TMPDIR=${TMPDIR}"
-          mkdir -p '${{ github.workspace }}/logs'
+          status=0
           for round in $(seq 1 ${{ matrix.rounds }}); do
-            log='${{ github.workspace }}'"/logs/round-${round}.log"
-            cargo test --release -p gst-mxl-rs --all-targets --locked --no-fail-fast -- --test-threads=1 > "${log}" 2>&1 || true
+            log="${RUNNER_TEMP}/round-${round}.log"
+            {
+              cargo test --release --all-targets --locked --workspace --exclude gst-mxl-rs -- --test-threads=1 &&
+              cargo test --release --locked -p gst-mxl-rs --lib -- --test-threads=1
+            } > "${log}" 2>&1 || status=1
             passed="$(grep -E '^test result' "${log}" | awk '{p+=$4} END{print p+0}')"
             failed="$(grep -E '^test result' "${log}" | awk '{f+=$6} END{print f+0}')"
-            skipped="$(grep -cE '^test .* \.\.\. skipped,' "${log}" || true)"
-            echo "round ${round}: passed ${passed}, failed ${failed}, skipped ${skipped}"
+            echo "round ${round}: passed ${passed}, failed ${failed}"
             grep -E '^test .* \.\.\. FAILED' "${log}" | sed 's/^/    /' || true
+            grep -A2 'panicked at' "${log}" | sed 's/^/    /' || true
           done
-          echo "=== failures over all rounds"
-          cat '${{ github.workspace }}'/logs/round-*.log | grep -E '^test .* \.\.\. FAILED' | sort | uniq -c | sort -rn || true
-          echo "=== panic messages"
-          cat '${{ github.workspace }}'/logs/round-*.log | grep -A2 'panicked at' | grep -v '^--$' | sort | uniq -c | sort -rn | head -60 || true
-
-      - name: Upload the logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: logs-${{ matrix.domain }}
-          path: ${{ github.workspace }}/logs
+          exit "${status}"
