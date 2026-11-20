@@ -15,13 +15,13 @@ permissions:
 
 jobs:
   proposed_ci_step:
-    name: Proposed macOS test step x${{ matrix.rounds }} (attempt ${{ matrix.attempt }})
+    name: Proposed macOS test step on Intel x${{ matrix.rounds }} (attempt ${{ matrix.attempt }})
     strategy:
       fail-fast: false
       matrix:
         attempt: [1, 2]
         rounds: [5]
-    runs-on: macos-26
+    runs-on: macos-26-intel
     env:
       RUST_VERSION: 1.90.0
     steps:
@@ -41,7 +41,7 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: ${{ github.workspace }}/vcpkg_cache
-          key: vcpkg-experiment-macos-26-arm64-${{ hashFiles('mxl/vcpkg.json') }}
+          key: vcpkg-experiment-macos-26-x64-${{ hashFiles('mxl/vcpkg.json') }}
 
       - name: Install build dependencies
         run: brew install cmake gstreamer ninja pkgconf
@@ -57,13 +57,13 @@ jobs:
           '${{ github.workspace }}/vcpkg/bootstrap-vcpkg.sh' -disableMetrics
           printf 'VCPKG_ROOT=%s\n' '${{ github.workspace }}/vcpkg' >> "${GITHUB_ENV}"
           printf 'VCPKG_BINARY_SOURCES=clear;files,${{ github.workspace }}/vcpkg_cache,readwrite\n' >> "${GITHUB_ENV}"
-          printf 'VCPKG_DEFAULT_TRIPLET=arm64-osx\n' >> "${GITHUB_ENV}"
+          printf 'VCPKG_DEFAULT_TRIPLET=x64-osx\n' >> "${GITHUB_ENV}"
 
       - name: Build the tests
         working-directory: mxl/rust
         run: |
           # The spdlog patch download from github.com fails with 503 now and then.
-          for attempt in 1 2 3 4 5; do
+          for attempt in 1 2 3 4 5 6 7 8; do
             if cargo test --release --all-targets --locked --no-run; then
               exit 0
             fi
